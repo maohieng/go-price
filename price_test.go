@@ -454,7 +454,7 @@ func TestJSONPrice_Marshal(t *testing.T) {
 	t.Run("JSON marshalling works", func(t *testing.T) {
 		price := NewFromFloat(55.111111, "USD")
 
-		priceJSON, err := price.MarshalJSON()
+		priceJSON, err := json.Marshal(&price)
 		require.NoError(t, err)
 		assert.Equal(t, `{"amount":"55.111111","currency":"USD"}`, string(priceJSON))
 	})

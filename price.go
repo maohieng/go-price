@@ -2,7 +2,6 @@ package price
 
 import (
 	"database/sql/driver"
-	"encoding"
 	"encoding/json"
 	"errors"
 	"math"
@@ -18,63 +17,13 @@ type (
 		currency string
 	}
 
-	// Charge is a Amount of a certain Type. Charge is used as value object
-	Charge struct {
-		// Price that is paid, can be in a certain currency
-		Price Price
-		// Value of the "Price" in another (base) currency
-		Value Price
-		// Type of the charge - can be ChargeTypeMain or something else. Used to differentiate between different charges of a single thing
-		Type string
-		// Reference contains further information to distinguish charges of the same type
-		Reference string
-	}
-
-	// Charges - Represents the Charges the product need to be paid with
-	Charges struct {
-		chargesByQualifier map[ChargeQualifier]Charge
-	}
-
-	// ChargeQualifier distinguishes charges by type and reference
-	ChargeQualifier struct {
-		// Type represents charge type
-		Type string
-		// Reference contains further information to distinguish charges of the same type
-		Reference string
-	}
-
-	// priceEncodeAble is a type that we need to allow marshalling the price values. The type itself is unexported
-	priceEncodeAble struct {
-		Amount   big.Float
-		Currency string
-	}
-
 	priceJSON struct {
 		Amount   string `db:"amount,omitempty" firestore:"amount,omitempty" json:"amount,omitempty"`
 		Currency string `db:"currency,omitempty" firestore:"currency,omitempty" json:"currency,omitempty"`
 	}
-
-	// Discount represents the amount of discount in Price or percentage.
-	// Percentage is priority used over Price.
-	// To get discounted Price, use Discounted func for percentage
-	//	or Sub func for Price.
-	Discount struct {
-		Price      Price `db:"price,omitempty" firestore:"price,omitempty" json:"price,omitempty"`
-		Percentage int   `db:"percentage,omitempty" firestore:"percentage,omitempty" json:"percentage,omitempty"`
-	}
-)
-
-var (
-	_ encoding.BinaryMarshaler   = Price{}
-	_ encoding.BinaryUnmarshaler = &Price{}
 )
 
 const (
-	// ChargeTypeGiftCard  used as a charge type for gift cards
-	ChargeTypeGiftCard = "giftcard"
-	// ChargeTypeMain used as default for a Charge
-	ChargeTypeMain = "main"
-
 	// RoundingModeFloor use if you want to cut (round down)
 	RoundingModeFloor = "floor"
 	// RoundingModeCeil use if you want to round up always
@@ -123,6 +72,75 @@ func NewFromInt(amount int64, precision int, currency string) Price {
 		amount:   *new(big.Float).Quo(amountF, precicionF),
 		currency: currency,
 	}
+}
+
+func (p Price) String() string {
+	bytes, _ := p.MarshalText()
+	return string(bytes)
+}
+
+func (p Price) MarshalText() (text []byte, err error) {
+	pj := &priceJSON{
+		Amount:   p.amount.String(),
+		Currency: p.currency,
+	}
+	return json.Marshal(pj)
+}
+
+func (p *Price) UnmarshalText(b []byte) error {
+	pj := &priceJSON{}
+	err := json.Unmarshal(b, pj)
+	if err != nil {
+		return err
+	}
+
+	am, _, err := new(big.Float).Parse(pj.Amount, 10)
+	if err != nil {
+		return err
+	}
+
+	p.amount = *am
+	p.currency = pj.Currency
+
+	return nil
+}
+
+// MarshalJSON implements interface required by json marshal
+func (p Price) MarshalJSON() (data []byte, err error) {
+	return p.MarshalText()
+}
+
+// UnmarshalJSON implements encode Unmarshaler
+func (p *Price) UnmarshalJSON(data []byte) error {
+	return p.UnmarshalText(data)
+}
+
+// MarshalBinary implements interface required by gob
+func (p Price) MarshalBinary() (data []byte, err error) {
+	return p.MarshalText()
+}
+
+// UnmarshalBinary implements interface required by gob.
+// Modifies the receiver so it must take a pointer receiver!
+func (p *Price) UnmarshalBinary(data []byte) error {
+	return p.UnmarshalText(data)
+}
+
+// Value makes the Price struct implement the driver.Valuer interface. This method
+// simply returns the JSON-encoded representation of the struct.
+func (p Price) Value() (driver.Value, error) {
+	return json.Marshal(p)
+}
+
+// Scan makes the Price struct implement the sql.Scanner interface. This method
+// simply decodes a JSON-encoded value into the struct fields.
+func (p *Price) Scan(value interface{}) error {
+	b, ok := value.([]byte)
+	if !ok {
+		return errors.New("type assertion to []byte failed")
+	}
+
+	return json.Unmarshal(b, &p)
 }
 
 // Add the given price to the current price and returns a new price
@@ -323,6 +341,7 @@ func (p Price) GetPayable() Price {
 
 // GetPayableByRoundingMode returns the price rounded you can pass the used rounding mode and precision
 // Example for precision 100:
+//
 //	1.115 >  1.12 (RoundingModeHalfUp)  / 1.11 (RoundingModeFloor)
 //	-1.115 > -1.11 (RoundingModeHalfUp) / -1.12 (RoundingModeFloor)
 func (p Price) GetPayableByRoundingMode(mode string, precision int) Price {
@@ -388,10 +407,10 @@ func (p Price) payableRoundingPrecision() (string, int) {
 }
 
 // SplitInPayables returns "count" payable prices (each rounded) that in sum matches the given price
-//  - Given a price of 12.456 (Payable 12,46)  - Splitted in 6 will mean: 6 * 2.076
-//  - but having them payable requires rounding them each (e.g. 2.07) which would mean we have 0.03 difference (=12,45-6*2.07)
-//  - so that the sum is as close as possible to the original value   in this case the correct return will be:
-//  - 	 2.07 + 2.07+2.08 +2.08 +2.08 +2.08
+//   - Given a price of 12.456 (Payable 12,46)  - Splitted in 6 will mean: 6 * 2.076
+//   - but having them payable requires rounding them each (e.g. 2.07) which would mean we have 0.03 difference (=12,45-6*2.07)
+//   - so that the sum is as close as possible to the original value   in this case the correct return will be:
+//   - 2.07 + 2.07+2.08 +2.08 +2.08 +2.08
 func (p Price) SplitInPayables(count int) ([]Price, error) {
 	if count <= 0 {
 		return nil, errors.New("split must be higher than zero")
@@ -464,276 +483,4 @@ func SumAll(prices ...Price) (Price, error) {
 		}
 	}
 	return result, nil
-}
-
-// MarshalJSON implements interface required by json marshal
-func (p Price) MarshalJSON() (data []byte, err error) {
-	pn := priceJSON{
-		Amount:   p.Amount().String(),
-		Currency: p.currency,
-	}
-
-	r, e := json.Marshal(&pn)
-	return r, e
-}
-
-// MarshalBinary implements interface required by gob
-func (p Price) MarshalBinary() (data []byte, err error) {
-	return json.Marshal(p)
-}
-
-// UnmarshalBinary implements interface required by gob.
-// Modifies the receiver so it must take a pointer receiver!
-func (p *Price) UnmarshalBinary(data []byte) error {
-	var pe priceEncodeAble
-	err := json.Unmarshal(data, &pe)
-	if err != nil {
-		return err
-	}
-	p.amount = pe.Amount
-	p.currency = pe.Currency
-	return nil
-}
-
-// UnmarshalJSON implements encode Unmarshaler
-func (p *Price) UnmarshalJSON(data []byte) error {
-	return p.UnmarshalBinary(data)
-}
-
-// Value makes the Price struct implement the driver.Valuer interface. This method
-// simply returns the JSON-encoded representation of the struct.
-func (p Price) Value() (driver.Value, error) {
-	return json.Marshal(p)
-}
-
-// Scan makes the Price struct implement the sql.Scanner interface. This method
-// simply decodes a JSON-encoded value into the struct fields.
-func (p *Price) Scan(value interface{}) error {
-	b, ok := value.([]byte)
-	if !ok {
-		return errors.New("type assertion to []byte failed")
-	}
-
-	return json.Unmarshal(b, &p)
-}
-
-// Add the given Charge to the current Charge and returns a new Charge
-func (p Charge) Add(add Charge) (Charge, error) {
-	if p.Type != add.Type {
-		return Charge{}, errors.New("charge type mismatch")
-	}
-	newPrice, err := p.Price.Add(add.Price)
-	if err != nil {
-		return Charge{}, err
-	}
-	p.Price = newPrice
-
-	newPrice, err = p.Value.Add(add.Value)
-	if err != nil {
-		return Charge{}, err
-	}
-	p.Value = newPrice
-	return p, nil
-}
-
-// GetPayable rounds the charge
-func (p Charge) GetPayable() Charge {
-	p.Value = p.Value.GetPayable()
-	p.Price = p.Price.GetPayable()
-	return p
-}
-
-// Mul the given Charge and returns a new Charge
-func (p Charge) Mul(qty int) Charge {
-	p.Price = p.Price.Multiply(qty)
-	p.Value = p.Value.Multiply(qty)
-	return p
-}
-
-// NewCharges creates a new Charges object
-func NewCharges(chargesByType map[string]Charge) *Charges {
-	charges := addChargeQualifier(chargesByType)
-	return &charges
-}
-
-// HasType returns a true if any charges include a charge with given type
-func (c Charges) HasType(ctype string) bool {
-	for qualifier := range c.chargesByQualifier {
-		if qualifier.Type == ctype {
-			return true
-		}
-	}
-	return false
-}
-
-// GetByType returns a charge of given type. If it was not found a Zero amount
-// is returned and the second return value is false
-// sums up charges by a certain type if there are multiple
-func (c Charges) GetByType(ctype string) (Charge, bool) {
-	// guard in case type is not available
-	if !c.HasType(ctype) {
-		return Charge{}, false
-	}
-	result := Charge{
-		Type: ctype,
-	}
-	// sum up all charges with certain type to one charge
-	for qualifier, charge := range c.chargesByQualifier {
-		if qualifier.Type == ctype {
-			result, _ = result.Add(charge)
-		}
-	}
-	return result, true
-}
-
-// HasChargeQualifier returns a true if any charges include a charge with given type
-// and concrete key values provided by additional
-func (c Charges) HasChargeQualifier(qualifier ChargeQualifier) bool {
-	if _, ok := c.chargesByQualifier[qualifier]; ok {
-		return true
-	}
-	return false
-}
-
-// GetByChargeQualifier returns a charge of given qualifier.
-// If it was not found a Zero amount is returned and the second return value is false
-func (c Charges) GetByChargeQualifier(qualifier ChargeQualifier) (Charge, bool) {
-	// guard in case type is not available
-	if !c.HasChargeQualifier(qualifier) {
-		return Charge{}, false
-	}
-
-	if charge, ok := c.chargesByQualifier[qualifier]; ok {
-		return charge, true
-	}
-	return Charge{}, false
-}
-
-// GetByChargeQualifierForced returns a charge of given qualifier.
-// If it was not found a Zero amount is returned. This method might be useful to call in View (template) directly.
-func (c Charges) GetByChargeQualifierForced(qualifier ChargeQualifier) Charge {
-	result, ok := c.GetByChargeQualifier(qualifier)
-	if !ok {
-		return Charge{}
-	}
-	return result
-}
-
-// GetByTypeForced returns a charge of given type. If it was not found a Zero amount is returned.
-// This method might be useful to call in View (template) directly where you need one return value
-// sums up charges by a certain type if there are multiple
-func (c Charges) GetByTypeForced(ctype string) Charge {
-	result, ok := c.GetByType(ctype)
-	if !ok {
-		return Charge{}
-	}
-	return result
-}
-
-// GetAllCharges returns all charges
-func (c Charges) GetAllCharges() map[ChargeQualifier]Charge {
-	return c.chargesByQualifier
-}
-
-// GetAllByType returns all charges of type
-func (c Charges) GetAllByType(ctype string) map[ChargeQualifier]Charge {
-	chargesByType := make(map[ChargeQualifier]Charge)
-
-	for qualifier, charge := range c.chargesByQualifier {
-		if qualifier.Type == ctype {
-			chargesByType[ChargeQualifier{
-				qualifier.Type,
-				qualifier.Reference,
-			}] = charge
-		}
-	}
-
-	return chargesByType
-}
-
-// Add returns new Charges with the given added
-func (c Charges) Add(toadd Charges) Charges {
-	if c.chargesByQualifier == nil {
-		c.chargesByQualifier = make(map[ChargeQualifier]Charge)
-	}
-	for addk, addCharge := range toadd.chargesByQualifier {
-		if existingCharge, ok := c.chargesByQualifier[addk]; ok {
-			chargeSum, _ := existingCharge.Add(addCharge)
-			c.chargesByQualifier[addk] = chargeSum.GetPayable()
-		} else {
-			c.chargesByQualifier[addk] = addCharge
-		}
-	}
-	return c
-}
-
-// AddCharge returns new Charges with the given Charge added
-func (c Charges) AddCharge(toadd Charge) Charges {
-	if c.chargesByQualifier == nil {
-		c.chargesByQualifier = make(map[ChargeQualifier]Charge)
-	}
-	qualifier := ChargeQualifier{
-		Type:      toadd.Type,
-		Reference: toadd.Reference,
-	}
-	if existingCharge, ok := c.chargesByQualifier[qualifier]; ok {
-		chargeSum, _ := existingCharge.Add(toadd)
-		c.chargesByQualifier[qualifier] = chargeSum.GetPayable()
-	} else {
-		c.chargesByQualifier[qualifier] = toadd
-	}
-
-	return c
-}
-
-// Mul returns new Charges with the given multiplied
-func (c Charges) Mul(qty int) Charges {
-	if c.chargesByQualifier == nil {
-		return c
-	}
-	for t, charge := range c.chargesByQualifier {
-		c.chargesByQualifier[t] = charge.Mul(qty)
-	}
-	return c
-}
-
-// Items returns all charges items
-func (c Charges) Items() []Charge {
-	var charges []Charge
-
-	for _, charge := range c.chargesByQualifier {
-		charges = append(charges, charge)
-	}
-
-	return charges
-}
-
-// addChargeQualifier parse string keys to charge qualifier for backwards compatibility
-func addChargeQualifier(chargesByType map[string]Charge) Charges {
-	withQualifier := make(map[ChargeQualifier]Charge)
-	for chargeType, charge := range chargesByType {
-		qualifier := ChargeQualifier{
-			Type:      chargeType,
-			Reference: charge.Reference,
-		}
-		withQualifier[qualifier] = charge
-	}
-	return Charges{chargesByQualifier: withQualifier}
-}
-
-// Value makes the Discount struct implement the driver.Valuer interface. This method
-// simply returns the JSON-encoded representation of the struct.
-func (a Discount) Value() (driver.Value, error) {
-	return json.Marshal(a)
-}
-
-// Scan makes the Discount struct implement the sql.Scanner interface. This method
-// simply decodes a JSON-encoded value into the struct fields.
-func (a *Discount) Scan(value interface{}) error {
-	b, ok := value.([]byte)
-	if !ok {
-		return errors.New("type assertion to []byte failed")
-	}
-
-	return json.Unmarshal(b, &a)
 }
